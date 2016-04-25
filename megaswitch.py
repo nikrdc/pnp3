@@ -126,6 +126,7 @@ class Megaswitch (object):
     # Save the graph as an instance attribute.
     self.graph = topo_graph
     self.down_switches = {}
+    self.events = {}
 
     # This component relies on some other components.  This registers those
     # dependencies and automatically binds event listeners (such as the
@@ -163,6 +164,18 @@ class Megaswitch (object):
     for host in host_data:
       self.log.info("Got host: %s", " ".join("%s=%s" % kv
                                              for kv in sorted(host.items())))
+      
+      host_e = host['ether']
+      if host_e in self.graph:
+        self.graph.remove_node(host_e)
+      self.graph.add_node(host_e)
+      attached_switch = self.graph.names[host['attached_switch']]
+      self.graph.add_edge(host_e, attached_switch)
+      self.graph.add_edge(attached_switch, host_e)
+      port_dict = {'ports': {attached_switch: host['attached_port']}}
+      self.graph.edge[host_e][attached_switch] = port_dict   
+      self.graph.edge[attached_switch][host_e] = port_dict
+      # handle host with different attached switch, !down host!, host with different attached port
 
   def set_acl (self, acl_data):
     """
@@ -203,7 +216,22 @@ class Megaswitch (object):
     
     e.connection.send(nx_flow_mod_table_id())  # Enables multiple tables
 
-    switch = self.graph.dpids[e.dpid]
+    self.events[e.dpid] = e
+
+    switch = self.graph.names[e.dpid]
+   
+    self.down_switches[switch] = [self.graph.node[switch], self.graph[switch]]
+    self.graph.remove_node(switch)
+ 
+    if switch not in self.graph:
+      zombie = self.down_switches[switch]
+      self.graph.add_node(switch)
+      self.graph.node[switch] = zombie[0]
+      for edge in zombie[1]:
+        self.graph.add_edge(switch, edge)
+        self.graph.add_edge(edge, switch)
+        self.graph.edge[switch][edge] = zombie[1][edge]
+        self.graph.edge[edge][switch] = zombie[1][edge]
 
     paths = nx.shortest_path(self.graph, source=switch)
     data = []
@@ -223,6 +251,7 @@ class Megaswitch (object):
       data.append(fm.pack())
     
     core.openflow.sendToDPID(e.dpid, b''.join(data))
+    # recalculate shortest paths for all nodes
 
   def _handle_openflow_ConnectionDown (self, e):
     """
@@ -232,7 +261,13 @@ class Megaswitch (object):
     the switch has failed.
     """
     self.log.warn("Switch [%s] has gone down", dpid_to_str(e.dpid))
-
+   
+    switch = self.graph.names[e.dpid]
+ 
+    self.down_switches[switch] = [switch, self.graph.node[switch], self.graph[switch]]
+    self.graph.remove_node(switch)
+    # recalculate shortest paths and inform nodes
+        
   def _handle_openflow_PortStatus (self, e):
     """
     Handle ofp_port_status messages
@@ -274,7 +309,7 @@ def launch (topo):
   g = gutil.get_graph(topo)
 
   bad_nodes = set() # Things that aren't usable switches
-  g.dpids = {}
+  g.names = {}
 
   for n,info in g.nodes(data=True):
     if info.get('entity_type','').lower() == 'host':
@@ -290,7 +325,7 @@ def launch (topo):
     dpid = info['dpid']
     if isinstance(dpid, str):
       info['dpid'] = str_to_dpid(dpid)
-    g.dpids[info['dpid']] = n
+    g.names[info['dpid']] = n
 
   g.remove_nodes_from(bad_nodes)  
 
