@@ -126,7 +126,7 @@ class Megaswitch (object):
     # Save the graph as an instance attribute.
     self.graph = topo_graph
     self.down_switches = {}
-    self.events = {}
+    self.hosts = {}
 
     # This component relies on some other components.  This registers those
     # dependencies and automatically binds event listeners (such as the
@@ -165,18 +165,60 @@ class Megaswitch (object):
       self.log.info("Got host: %s", " ".join("%s=%s" % kv
                                              for kv in sorted(host.items())))
       
-      host_e = host['ether']
+      host_e = str(host['ether'])
+      switch_dpid = host['attached_switch']
+      switch_port = host['attached_port']
+      switch_name = self.graph.names[switch_dpid]
+
+      self.hosts[host_e] = switch_dpid
+
       if host_e in self.graph:
         self.graph.remove_node(host_e)
+        # alter table info on attached switch
+
       self.graph.add_node(host_e)
-      attached_switch = self.graph.names[host['attached_switch']]
+      attached_switch = self.graph.names[switch_dpid]
       self.graph.add_edge(host_e, attached_switch)
       self.graph.add_edge(attached_switch, host_e)
-      port_dict = {'ports': {attached_switch: host['attached_port']}}
+      port_dict = {'ports': {attached_switch: switch_port}}
       self.graph.edge[host_e][attached_switch] = port_dict   
       self.graph.edge[attached_switch][host_e] = port_dict
-      # handle host with different attached switch, !down host!, host with different attached port
+      
+      data = []
 
+      fm = ofp_flow_mod_table_id(
+              table_id = 0,
+              match = of01.ofp_match(dl_dst=host_e),
+              actions = [ofp_action_strip_vlan(), ofp_action_output(port=switch_port)])
+      data.append(fm.pack())
+
+      for dst_host, dst_switch_dpid in self.hosts.items():
+        if dst_host == host_e:
+          continue
+
+        #dst_switch_name = self.graph.names[dst_switch_dpid]
+        #next_hop = nx.shortest_path(self.graph, source=switch_name, target=dst_switch_name)[1] 
+        #shortest_path_port = self.graph[switch_name][next_hop]['ports'][switch_name]
+        #self.log.info(str(host_e) + ' ' + str(dst_host))
+        #self.log.info(str(dst_switch_dpid) + ' ' + str(shortest_path_port))
+        
+        fm = ofp_flow_mod_table_id(
+                table_id = 0,
+                match = of01.ofp_match(dl_src=host_e, dl_dst=dst_host),
+                actions = [ofp_action_set_vlan_vid(vlan_vid=dst_switch_dpid)])
+        data.append(fm.pack())
+ 
+        fm = ofp_flow_mod_table_id(
+               table_id = 0,
+               match = of01.ofp_match(dl_src=dst_host, dl_dst=host_e),
+               actions = [ofp_action_set_vlan_vid(vlan_vid=switch_dpid)])
+        core.openflow.sendToDPID(dst_switch_dpid, fm.pack()) 
+      
+      core.openflow.sendToDPID(switch_dpid, b''.join(data))
+   
+      # handle host with different attached switch, !down host!, host with different attached port
+      # tell attached_switch to add and remove VLAN tags
+      
   def set_acl (self, acl_data):
     """
     Receive list of access control entries (an ACL)
@@ -206,6 +248,28 @@ class Megaswitch (object):
     """
     self.log.warn("Switch [%s] sent packet %s", dpid_to_str(e.dpid), e.parsed)
 
+  def shortest_paths_to_switches (self):
+    all_paths = nx.shortest_path(self.graph)
+    for src, paths in all_paths.items():
+      src_dpid = self.graph.node[src]['dpid'] 
+      if core.openflow.getConnection(src_dpid):
+        data = []
+     
+        for dst, path in paths.items():
+          if dst == src:
+            continue
+          dst_dpid = self.graph.node[dst]['dpid']
+          next_hop = path[1]
+          shortest_path_port = self.graph[src][next_hop]['ports'][src]
+         
+          fm = ofp_flow_mod_table_id(
+                  table_id = 0,
+                  match = of01.ofp_match(dl_vlan=dst_dpid),
+                  actions = [ofp_action_output(port=shortest_path_port)])
+          data.append(fm.pack())
+      
+        core.openflow.sendToDPID(src_dpid, b''.join(data))
+
   def _handle_openflow_ConnectionUp (self, e):
     """
     Handle the case when your connection to a switch goes up
@@ -216,42 +280,19 @@ class Megaswitch (object):
     
     e.connection.send(nx_flow_mod_table_id())  # Enables multiple tables
 
-    self.events[e.dpid] = e
-
-    switch = self.graph.names[e.dpid]
+    switch_name = self.graph.names[e.dpid]
    
-    self.down_switches[switch] = [self.graph.node[switch], self.graph[switch]]
-    self.graph.remove_node(switch)
- 
-    if switch not in self.graph:
-      zombie = self.down_switches[switch]
-      self.graph.add_node(switch)
-      self.graph.node[switch] = zombie[0]
+    if switch_name not in self.graph:
+      zombie = self.down_switches[switch_name]
+      self.graph.add_node(switch_name)
+      self.graph.node[switch_name] = zombie[0]
       for edge in zombie[1]:
-        self.graph.add_edge(switch, edge)
-        self.graph.add_edge(edge, switch)
-        self.graph.edge[switch][edge] = zombie[1][edge]
-        self.graph.edge[edge][switch] = zombie[1][edge]
+        self.graph.add_edge(switch_name, edge)
+        self.graph.add_edge(edge, switch_name)
+        self.graph.edge[switch_name][edge] = zombie[1][edge]
+        self.graph.edge[edge][switch_name] = zombie[1][edge]
 
-    paths = nx.shortest_path(self.graph, source=switch)
-    data = []
-    for dst, path in paths.items():
-      if dst == switch:
-        continue
-      
-      dst_dpid = self.graph.node[dst]['dpid']
-      next_hop = path[1]
-      shortest_path_port = self.graph[switch][next_hop]['ports'][switch]
-      #self.log.info(str(switch) + ' --> ' + str(dst) + ' : ' + str(shortest_path_port))
-      
-      fm = ofp_flow_mod_table_id(
-              table_id = 0,
-              match = of01.ofp_match(dl_vlan=dst_dpid),
-              actions = ofp_action_output(port=shortest_path_port))
-      data.append(fm.pack())
-    
-    core.openflow.sendToDPID(e.dpid, b''.join(data))
-    # recalculate shortest paths for all nodes
+    self.shortest_paths_to_switches()  
 
   def _handle_openflow_ConnectionDown (self, e):
     """
@@ -262,12 +303,12 @@ class Megaswitch (object):
     """
     self.log.warn("Switch [%s] has gone down", dpid_to_str(e.dpid))
    
-    switch = self.graph.names[e.dpid]
+    switch_name = self.graph.names[e.dpid]
  
-    self.down_switches[switch] = [switch, self.graph.node[switch], self.graph[switch]]
-    self.graph.remove_node(switch)
-    # recalculate shortest paths and inform nodes
-        
+    self.down_switches[switch_name] = [self.graph.node[switch_name], self.graph[switch_name]]
+    self.graph.remove_node(switch_name)
+    self.shortest_paths_to_switches()
+ 
   def _handle_openflow_PortStatus (self, e):
     """
     Handle ofp_port_status messages
