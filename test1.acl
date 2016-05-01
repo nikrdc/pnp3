@@ -1,0 +1,4 @@
+deny 00:00:01:01:01:01 any
+permit any any
+#run with ../../acls/acl_util.py test1.acl 127.0.0.1, then type sync.
+#this causes megaswitch to hit set_acl function
