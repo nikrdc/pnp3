@@ -55,7 +55,6 @@ from pox.openflow.nicira import (
   ofp_flow_mod_table_id, # Extended ofp_flow_mod with a table_id field
   nx_flow_mod_table_id,  # Enables the above extension
   )
-
 # Wrappers to make some Nicira extensions look a bit more like plain old
 # OpenFlow 1.0 -- just for simplicty's sake.
 # These shouldn't really have the "ofp_" prefix, but we do it for regularity.
@@ -127,6 +126,15 @@ class Megaswitch (object):
     self.graph = topo_graph
     self.down_switches = {}
     self.hosts = {}
+
+    # Container for our ACL list, or None if we don't have any ACLs.
+    # foreach ace in acl_list
+    # mode = ace["mode"]
+    # src = ace["ether_src"]
+    # dst = ace["ether_dst"]
+    self.acl_list = None
+    # If we should even look at ACLs. Could make this a commandline switch, but nope.
+    self.ACL_FEATURE_ENABLED = True
 
     # This component relies on some other components.  This registers those
     # dependencies and automatically binds event listeners (such as the
@@ -238,6 +246,8 @@ class Megaswitch (object):
     for ace in acl_data:
       self.log.info("Got ACE: %s", " ".join("%s=%s" % kv
                                             for kv in sorted(ace.items())))
+    self.acl_list = acl_data
+    self.shortest_paths_to_switches()
 
   def _handle_openflow_PacketIn (self, e):
     """
@@ -269,6 +279,16 @@ class Megaswitch (object):
           data.append(fm.pack())
       
         core.openflow.sendToDPID(src_dpid, b''.join(data))
+
+  def _edge_is_permitted (self, src, dst):
+      """
+      Determine if the connection between our two hosts is allowed or not by our ACL list.
+      :param src: The source ethernet address
+      :param dst: The destination ethernet address.
+      :return: True if the edge is permitted by our ACL list, or we have ACLs off. False if we block it.
+      """
+      if (not self.ACL_FEATURE_ENABLED or not self.acl_list):
+          return True
 
   def _handle_openflow_ConnectionUp (self, e):
     """
