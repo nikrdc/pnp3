@@ -1,5 +1,6 @@
 Group 5 Project 3
-
+================
+Nik + Nick
 
 Extra Feature - ACL
 ================
@@ -9,7 +10,10 @@ deactivate them in the megaswitch.py file with
 
 From the pox/ext directory, you can send some ACLs to the pox controller with 
 the acl utility.
+
 `../../acls/acl_util.py aclfile 127.0.0.1`
+
+Once the shell starts, you need to type "sync" to send the acls to the controller. 
 
 This will cause the controller to update all the flows on the switches
 and drop traffic that does not match a rule. 
