@@ -208,12 +208,12 @@ class Megaswitch (object):
           continue
         if not self._connection_is_permitted(host_e, dst_host):
           # If we're not allowed to send to this host (or this host is not allowed to receive), tell our switch
-          # to send all traffic going this way to port 0 (drop)
+          # to drop all traffic going to this host.
           self.log.info("MatchedDenyACE: src=%s dst=%s" % host_e, dst_host)
           fm = ofp_flow_mod_table_id(
                 table_id = 0,
                 match = of01.ofp_match(dl_src=host_e, dl_dst=dst_host),
-                actions = [ofp_action_output(0)])
+                actions = None)
           data.append(fm.pack())
           continue
 
