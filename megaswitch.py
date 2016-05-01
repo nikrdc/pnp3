@@ -135,6 +135,8 @@ class Megaswitch (object):
     self.acl_list = None
     # If we should even look at ACLs. Could make this a commandline switch, but nope.
     self.ACL_FEATURE_ENABLED = True
+    # Cached host data so we can re-init when we receive ACLs
+    self.last_host_data = None
 
     # This component relies on some other components.  This registers those
     # dependencies and automatically binds event listeners (such as the
@@ -169,6 +171,7 @@ class Megaswitch (object):
     of Host entities in the "emulated" network garnet is managing.  We
     receive it via the POX Messenger component and the messenger bot above.
     """
+    self.last_host_data = host_data
     for host in host_data:
       self.log.info("Got host: %s", " ".join("%s=%s" % kv
                                              for kv in sorted(host.items())))
@@ -202,6 +205,15 @@ class Megaswitch (object):
 
       for dst_host, dst_switch_dpid in self.hosts.items():
         if dst_host == host_e:
+          continue
+        if not self._connection_is_permitted(host_e, dst_host):
+          # If we're not allowed to send to this host (or this host is not allowed to receive), tell our switch
+          # to send all traffic going this way to port 0 (drop)
+          fm = ofp_flow_mod_table_id(
+                table_id = 0,
+                match = of01.ofp_match(dl_src=host_e, dl_dst=dst_host),
+                actions = [ofp_action_output(0)])
+          data.append(fm.pack())
           continue
 
         #dst_switch_name = self.graph.names[dst_switch_dpid]
@@ -247,7 +259,9 @@ class Megaswitch (object):
       self.log.info("Got ACE: %s", " ".join("%s=%s" % kv
                                             for kv in sorted(ace.items())))
     self.acl_list = acl_data
-    self.shortest_paths_to_switches()
+    # Go through and reinstall rules on each host to drop traffic if we're already up.
+    if self.last_host_data:
+      self.set_hosts(self.last_host_data)
 
   def _handle_openflow_PacketIn (self, e):
     """
@@ -280,7 +294,7 @@ class Megaswitch (object):
       
         core.openflow.sendToDPID(src_dpid, b''.join(data))
 
-  def _edge_is_permitted (self, src, dst):
+  def _connection_is_permitted (self, src, dst):
       """
       Determine if the connection between our two hosts is allowed or not by our ACL list.
       :param src: The source ethernet address
@@ -289,6 +303,8 @@ class Megaswitch (object):
       """
       if (not self.ACL_FEATURE_ENABLED or not self.acl_list):
           return True
+      else:
+          return False
 
   def _handle_openflow_ConnectionUp (self, e):
     """
