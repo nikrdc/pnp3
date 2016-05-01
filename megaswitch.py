@@ -301,10 +301,41 @@ class Megaswitch (object):
       :param dst: The destination ethernet address.
       :return: True if the edge is permitted by our ACL list, or we have ACLs off. False if we block it.
       """
+      # If we don't have an ACL list, or we disabled the feature in config, just return True.
       if (not self.ACL_FEATURE_ENABLED or not self.acl_list):
           return True
-      else:
+
+      elif (len(self.acl_list) == 0):
+          # This means we have an empty rules file, so we implicitly drop all traffic.
           return False
+
+      else:
+          # mode = ace["mode"]
+          # src = ace["ether_src"]
+          # dst = ace["ether_dst"]
+
+          # Grab our set of rules that match src destination, keeping them in order.
+          src_matching_rules = []
+          for ace in self.acl_list:
+            if (not src or src == ace["ether_src"]):
+                src_matching_rules.append(ace)
+
+          # Append our implicit "deny it all" rule at the end.
+          src_matching_rules.append({"ether_src" : None, "ether_dst" : None, "mode" : "deny"})
+
+          # For each rule that we matched the src, check if we match the destination too
+          for ace in src_matching_rules:
+              # Try to match our ACE with either a wildcard dst or a specific dst.
+              if (not dst or dst == ace["ether_dst"]):
+                  # If we hit a match, check it's decision, if empty decision or deny, block it!
+                  if (ace["mode"] or ace["mode"] == "deny"):
+                      return False
+                  # Otherwise allow this connection and break out of this code block.
+                  else:
+                      return True
+
+          # We didn't find a match, so we allow this connection.
+          return True
 
   def _handle_openflow_ConnectionUp (self, e):
     """
