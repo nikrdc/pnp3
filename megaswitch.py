@@ -128,6 +128,7 @@ class Megaswitch (object):
     self.hosts = {}
     self.edge = {}
     self.MST = None
+    self.down_links = {}
 
     # Container for our ACL list, or None if we don't have any ACLs.
     # foreach ace in acl_list
@@ -190,7 +191,6 @@ class Megaswitch (object):
         self.graph.remove_node(host_e)
         # alter table info on attached switch
 
-      self.graph.add_node(host_e)
       attached_switch = self.graph.names[switch_dpid]
       self.graph.add_edge(host_e, attached_switch)
       self.graph.add_edge(attached_switch, host_e)
@@ -207,9 +207,10 @@ class Megaswitch (object):
               actions = [ofp_action_strip_vlan(), ofp_action_output(port=switch_port)])
       data.append(fm.pack())
 
-      for dst_host, dst_switch_dpid in self.hosts.items():
+      for dst_host, dst_switch_dpid in self.hosts.items(): 
         if dst_host == host_e:
           continue
+            
         if not self._connection_is_permitted(host_e, dst_host):
           # If we're not allowed to send to this host (or this host is not allowed to receive), tell our switch
           # to drop all traffic going to this host.
@@ -222,7 +223,14 @@ class Megaswitch (object):
           continue
 
         dst_switch_name = self.graph.names[dst_switch_dpid]
-        next_hop = nx.shortest_path(self.graph, source=switch_name, target=dst_switch_name)[1] 
+        #self.log.info(switch_name + ' ' + dst_switch_name)
+        if switch_name == dst_switch_name:
+          continue
+        
+        try:
+          next_hop = nx.shortest_path(self.graph, source=switch_name, target=dst_switch_name)[1]
+        except:
+          continue 
         shortest_path_port = self.graph[switch_name][next_hop]['ports'][switch_name]
         #self.log.info(str(host_e) + ' ' + str(dst_host))
         #self.log.info(str(dst_switch_dpid) + ' ' + str(shortest_path_port))
@@ -234,7 +242,10 @@ class Megaswitch (object):
         data.append(fm.pack())
  
         core.openflow.sendToDPID(dst_switch_dpid, nx_flow_mod_table_id())  # Enables multiple tables
-        next_hop = nx.shortest_path(self.graph, source=dst_switch_name, target=switch_name)[1]
+        try:
+          next_hop = nx.shortest_path(self.graph, source=dst_switch_name, target=switch_name)[1]
+        except:
+          continue
         shortest_path_port = self.graph[dst_switch_name][next_hop]['ports'][dst_switch_name]
         fm = ofp_flow_mod_table_id(
                table_id = 0,
@@ -285,6 +296,8 @@ class Megaswitch (object):
   def shortest_paths_to_switches (self):
     all_paths = nx.shortest_path(self.graph)
     for src, paths in all_paths.items():
+      if 'dpid' not in self.graph.node[src]:
+        continue
       src_dpid = self.graph.node[src]['dpid'] 
       if core.openflow.getConnection(src_dpid):
         core.openflow.sendToDPID(src_dpid, nx_flow_mod_table_id())  # Enables multiple tables
@@ -293,14 +306,17 @@ class Megaswitch (object):
         for dst, path in paths.items():
           if dst == src:
             continue
+          
+          if 'dpid' not in self.graph.node[dst]:
+            continue
+          
           dst_dpid = self.graph.node[dst]['dpid']
-          self.log.info(str(src_dpid) + ' --> ' + str(dst_dpid) + ' : ' + str(path))
+          #self.log.info(str(src_dpid) + ' --> ' + str(dst_dpid) + ' : ' + str(path))
           next_hop = path[1]
           shortest_path_port = self.graph[src][next_hop]['ports'][src]
          
           fm = ofp_flow_mod_table_id(
                   table_id = 0,
-                  command = of01.OFPFC_MODIFY,
                   match = of01.ofp_match(dl_vlan=dst_dpid),
                   actions = [ofp_action_output(port=shortest_path_port)])
           data.append(fm.pack())
@@ -354,7 +370,7 @@ class Megaswitch (object):
     self.MST = nx.minimum_spanning_tree(self.graph)
     switches = {}
     for edge in self.MST.edges(data=True):
-        self.log.info(edge)
+        #self.log.info(edge)
         src = edge[0]
         dst = edge[1]
   
@@ -373,13 +389,11 @@ class Megaswitch (object):
                 switches[dst] = [dst_outport]
     
     for switch, ports in switches.items():
+        if 'dpid' not in self.graph.node[switch]:
+            continue
         switch_dpid = self.graph.node[switch]['dpid']
         core.openflow.sendToDPID(switch_dpid, nx_flow_mod_table_id())
         out_actions = [ofp_action_output(port=p) for p in ports]
-        if switch_dpid in self.edge:
-            self.log.info(str(switch_dpid)+' '+str(self.edge[switch_dpid]))
-            out_actions.append(ofp_action_output(port=self.edge[switch_dpid]))
-        self.log.info(out_actions)
         fm = ofp_flow_mod_table_id(
                 table_id = 0,
                 command = of01.OFPFC_MODIFY,
@@ -398,7 +412,7 @@ class Megaswitch (object):
     e.connection.send(nx_flow_mod_table_id())  # Enables multiple tables
 
     switch_name = self.graph.names[e.dpid]
-   
+ 
     if switch_name not in self.graph:
       zombie = self.down_switches[switch_name]
       self.graph.add_node(switch_name)
@@ -408,6 +422,7 @@ class Megaswitch (object):
         self.graph.add_edge(edge, switch_name)
         self.graph.edge[switch_name][edge] = zombie[1][edge]
         self.graph.edge[edge][switch_name] = zombie[1][edge]
+      del self.down_switches[switch_name]
 
     self.shortest_paths_to_switches()
     self.broadcast_paths()
@@ -426,6 +441,7 @@ class Megaswitch (object):
     self.down_switches[switch_name] = [self.graph.node[switch_name], self.graph[switch_name]]
     self.graph.remove_node(switch_name)
     self.shortest_paths_to_switches()
+    self.broadcast_paths()
  
   def _handle_openflow_PortStatus (self, e):
     """
@@ -439,9 +455,27 @@ class Megaswitch (object):
     dpid = dpid_to_str(e.dpid) # the event object has the DPID of the switch
     port_no = e.ofp.desc.port_no # e.ofp is the ofp_port_status message
     if (e.ofp.desc.state & OFPPC_PORT_DOWN):
-      state = "down"
+      state = "down" 
+      name = self.graph.names[e.dpid]
+      dst, dst_port_no = self.graph.node[name]['ports'][port_no]
+      if name in self.graph.edge and dst in self.graph.edge[name]:
+        removed_edge = self.graph.edge[name][dst]
+        self.graph.remove_edge(name, dst)
+        self.down_links[(name, port_no)] = [removed_edge, dst, dst_port_no]
+        self.shortest_paths_to_switches()
+        self.broadcast_paths() 
     else:
       state = "up"
+      name = self.graph.names[e.dpid]
+      if (name, port_no) in self.down_links:
+        removed_edge = self.down_links[(name, port_no)]
+        dst, dst_port_no = removed_edge[1], removed_edge[2]
+        self.graph.add_edge(name, dst)
+        self.graph.edge[name][dst] = removed_edge[0]
+        self.graph[name][dst] = removed_edge[0]
+        del self.down_links[(name, port_no)]
+        self.shortest_paths_to_switches()
+        self.broadcast_paths() 
     if e.ofp.reason == OFPPR_DELETE:
       reason = "deleted"
       state = "down" # If it's gone, we can probably consider it down!
