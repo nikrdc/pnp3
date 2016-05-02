@@ -124,11 +124,11 @@ class Megaswitch (object):
 
     # Save the graph as an instance attribute.
     self.graph = topo_graph
-    self.down_switches = {}
-    self.hosts = {}
-    self.edge = {}
-    self.MST = None
-    self.down_links = {}
+    self.down_switches = {} # Dictionary of down switches
+    self.hosts = {} # Dictionary of hosts and their attached switch
+    self.edge = {} # Dictionary of edge switches
+    self.MST = None # MST of network
+    self.down_links = {} # Dictionary of down links
 
     # Container for our ACL list, or None if we don't have any ACLs.
     # foreach ace in acl_list
@@ -189,8 +189,9 @@ class Megaswitch (object):
 
       if host_e in self.graph:
         self.graph.remove_node(host_e)
-        # alter table info on attached switch
+        # alter table info on attached switch 
 
+      # add host to networkX graph 
       attached_switch = self.graph.names[switch_dpid]
       self.graph.add_edge(host_e, attached_switch)
       self.graph.add_edge(attached_switch, host_e)
@@ -201,9 +202,11 @@ class Megaswitch (object):
       core.openflow.sendToDPID(switch_dpid, nx_flow_mod_table_id())  # Enables multiple tables
       data = []
 
+      # construct command to remove VLAN and output to host 
       fm = ofp_flow_mod_table_id(
               table_id = 0,
               match = of01.ofp_match(dl_dst=EthAddr(host_e)),
+              command = of01.OFPFC_MODIFY,
               actions = [ofp_action_strip_vlan(), ofp_action_output(port=switch_port)])
       data.append(fm.pack())
 
@@ -217,7 +220,8 @@ class Megaswitch (object):
           self.log.info("MatchedDenyACE: src=%s dst=%s" % host_e, dst_host)
           fm = ofp_flow_mod_table_id(
                 table_id = 0,
-                match = of01.ofp_match(dl_src=host_e, dl_dst=dst_host),
+                command = of01.OFPFC_MODIFY,
+                match = of01.ofp_match(dl_src=EthAddr(host_e), dl_dst=EthAddr(dst_host)),
                 actions = None)
           data.append(fm.pack())
           continue
@@ -235,8 +239,10 @@ class Megaswitch (object):
         #self.log.info(str(host_e) + ' ' + str(dst_host))
         #self.log.info(str(dst_switch_dpid) + ' ' + str(shortest_path_port))
         
+        # inform attached switch where other hosts are
         fm = ofp_flow_mod_table_id(
                 table_id = 0,
+                command = of01.OFPFC_MODIFY,
                 match = of01.ofp_match(dl_src=EthAddr(host_e), dl_dst=EthAddr(dst_host)),
                 actions = [ofp_action_set_vlan_vid(vlan_vid=dst_switch_dpid), ofp_action_output(port=shortest_path_port)])
         data.append(fm.pack())
@@ -247,8 +253,11 @@ class Megaswitch (object):
         except:
           continue
         shortest_path_port = self.graph[dst_switch_name][next_hop]['ports'][dst_switch_name]
+        
+        # inform other attached switches where this host is
         fm = ofp_flow_mod_table_id(
                table_id = 0,
+               command = of01.OFPFC_MODIFY,
                match = of01.ofp_match(dl_src=EthAddr(dst_host), dl_dst=EthAddr(host_e)),
                actions = [ofp_action_set_vlan_vid(vlan_vid=switch_dpid), ofp_action_output(port=shortest_path_port)])
         core.openflow.sendToDPID(dst_switch_dpid, fm.pack()) 
@@ -294,6 +303,7 @@ class Megaswitch (object):
     self.log.warn("Switch [%s] sent packet %s", dpid_to_str(e.dpid), e.parsed)
 
   def shortest_paths_to_switches (self):
+    # tell all switches what their next hop is to all other switches (for shortest paths)
     all_paths = nx.shortest_path(self.graph)
     for src, paths in all_paths.items():
       if 'dpid' not in self.graph.node[src]:
@@ -317,6 +327,7 @@ class Megaswitch (object):
          
           fm = ofp_flow_mod_table_id(
                   table_id = 0,
+                  command = of01.OFPFC_MODIFY,
                   match = of01.ofp_match(dl_vlan=dst_dpid),
                   actions = [ofp_action_output(port=shortest_path_port)])
           data.append(fm.pack())
@@ -367,39 +378,40 @@ class Megaswitch (object):
           return True
 
   def broadcast_paths (self):
+    # tell all switches what ports to send out broadcast packets
     self.MST = nx.minimum_spanning_tree(self.graph)
     switches = {}
     for edge in self.MST.edges(data=True):
-        #self.log.info(edge)
-        src = edge[0]
-        dst = edge[1]
+      #self.log.info(edge)
+      src = edge[0]
+      dst = edge[1]
   
-        if src in edge[2]['ports']:
-            src_outport = edge[2]['ports'][src]
-            if src in switches:
-                switches[src].append(src_outport)
-            else:
-                switches[src] = [src_outport]
+      if src in edge[2]['ports']:
+        src_outport = edge[2]['ports'][src]
+        if src in switches:
+          switches[src].append(src_outport)
+        else:
+          switches[src] = [src_outport]
 
-        if dst in edge[2]['ports']:
-            dst_outport = edge[2]['ports'][dst]
-            if dst in switches:
-                switches[dst].append(dst_outport)
-            else:
-                switches[dst] = [dst_outport]
+      if dst in edge[2]['ports']:
+        dst_outport = edge[2]['ports'][dst]
+        if dst in switches:
+          switches[dst].append(dst_outport)
+        else:
+          switches[dst] = [dst_outport]
     
     for switch, ports in switches.items():
-        if 'dpid' not in self.graph.node[switch]:
-            continue
-        switch_dpid = self.graph.node[switch]['dpid']
-        core.openflow.sendToDPID(switch_dpid, nx_flow_mod_table_id())
-        out_actions = [ofp_action_output(port=p) for p in ports]
-        fm = ofp_flow_mod_table_id(
-                table_id = 0,
-                command = of01.OFPFC_MODIFY,
-                match = of01.ofp_match(dl_dst=ETHER_BROADCAST),
-                actions = out_actions)
-        core.openflow.sendToDPID(switch_dpid, fm.pack())
+      if 'dpid' not in self.graph.node[switch]:
+        continue
+      switch_dpid = self.graph.node[switch]['dpid']
+      core.openflow.sendToDPID(switch_dpid, nx_flow_mod_table_id())
+      out_actions = [ofp_action_output(port=p) for p in ports]
+      fm = ofp_flow_mod_table_id(
+              table_id = 0,
+              command = of01.OFPFC_MODIFY,
+              match = of01.ofp_match(dl_dst=ETHER_BROADCAST),  
+              actions = out_actions)
+      core.openflow.sendToDPID(switch_dpid, fm.pack())
 
   def _handle_openflow_ConnectionUp (self, e):
     """
